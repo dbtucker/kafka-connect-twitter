@@ -1,1 +1,8 @@
-TwitterSourceConnector.properties
+.idea/
+target/
+SchemaedFile.iml
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+.mvn/timing.properties
