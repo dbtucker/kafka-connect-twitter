@@ -2,6 +2,8 @@ package io.confluent.kafka.connect.twitter;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.RateLimiter;
+import org.apache.kafka.common.metrics.stats.Rate;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTask;
@@ -20,11 +22,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
+/* Memory Usage considerations {based on testing in Nov 2016} */
+/* Each tweet, with attendent schema, is about 10 KB when using the simple JSON converters */
+/* Since we may not want to allocate multiple GB for just these tweets, we'll support   */
+/* a max size for the queue (though the default will remain unlimited) */
+
 public class TwitterSourceTask extends SourceTask implements StatusListener {
   static final Logger log = LoggerFactory.getLogger(TwitterSourceTask.class);
   final ConcurrentLinkedDeque<SourceRecord> messageQueue = new ConcurrentLinkedDeque<>();
+  int maxMessageQueueSize = 0;
 
   TwitterStream twitterStream;
+  RateLimiter rateLimiter = null;
+  int maxRecordsPerPeriod = 0;
 
   @Override
   public String version() {
@@ -36,6 +46,15 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
   @Override
   public void start(Map<String, String> map) {
     this.config = new TwitterSourceConnectorConfig(map);
+
+    maxMessageQueueSize = this.config.twitterQueueSize();
+
+      /* Define the rate limit based on 1-second sync using the RateLimiter */
+      /* No limiter of XferRate == 0 */
+    maxRecordsPerPeriod = this.config.kafkaXferRate();
+    if (maxRecordsPerPeriod > 0)
+      rateLimiter = RateLimiter.create(1.0);
+
 
     TwitterStreamFactory twitterStreamFactory = new TwitterStreamFactory(this.config.configuration());
     this.twitterStream = twitterStreamFactory.getInstance();
@@ -59,25 +78,35 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
   @Override
   public List<SourceRecord> poll() throws InterruptedException {
     List<SourceRecord> records = new ArrayList<>(256);
+    int size = this.messageQueue.size();
+    int throttledSize;
 
-    while (records.isEmpty()) {
-      int size = messageQueue.size();
+    if (rateLimiter != null)
+      rateLimiter.acquire();
 
-      for (int i = 0; i < size; i++) {
-        SourceRecord record = this.messageQueue.poll();
+    if (maxRecordsPerPeriod > 0  &&  size > maxRecordsPerPeriod)
+      throttledSize = maxRecordsPerPeriod;
+    else
+      throttledSize = size;
 
-        if (null == record) {
-          break;
-        }
+    if (size == 0)
+      return (null);
+    else
+      log.debug("poll(): {} messages available messagQueue; throttling to {}.",
+        Integer.toString(size), Integer.toString(throttledSize));
 
-        records.add(record);
+    for (int i = 0; i < throttledSize; i++) {
+      SourceRecord record = this.messageQueue.poll();
+      log.trace("record {} = {}", Integer.toString(i), record.toString());
+
+      if (null == record) {
+        break;
       }
 
-      if (records.isEmpty()) {
-        Thread.sleep(100);
-      }
+      records.add(record);
     }
 
+    log.debug("poll(): returning {} SourceRecords", Integer.toString(records.size()));
     return records;
   }
 
@@ -91,6 +120,11 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
 
   @Override
   public void onStatus(Status status) {
+    if (maxMessageQueueSize > 0  &&  this.messageQueue.size() > maxMessageQueueSize) {
+      log.info("onStatus(): Twitter messageQueue full ({} messages); discarding tweet", this.messageQueue.size());
+      return;
+    }
+
     try {
       Struct keyStruct = new Struct(StatusConverter.statusSchemaKey);
       Struct valueStruct = new Struct(StatusConverter.statusSchema);
@@ -103,6 +137,7 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
 
       SourceRecord record = new SourceRecord(sourcePartition, sourceOffset, this.config.kafkaStatusTopic(), StatusConverter.statusSchemaKey, keyStruct, StatusConverter.statusSchema, valueStruct);
       this.messageQueue.add(record);
+      log.debug("onStatus(): messageQueue.size() = {}", Integer.toString(this.messageQueue.size()));
     } catch (Exception ex) {
       if (log.isErrorEnabled()) {
         log.error("Exception thrown", ex);
@@ -113,6 +148,11 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
   @Override
   public void onDeletionNotice(StatusDeletionNotice statusDeletionNotice) {
     if (!this.config.processDeletes()) {
+      return;
+    }
+
+    if (maxMessageQueueSize > 0  &&  this.messageQueue.size() > maxMessageQueueSize) {
+      log.info("onDeletionNotice(): Twitter messageQueue full ({} messages); discarding delete notification", this.messageQueue.size());
       return;
     }
 
@@ -128,6 +168,7 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
 
       SourceRecord record = new SourceRecord(sourcePartition, sourceOffset, this.config.kafkaDeleteTopic(), StatusConverter.schemaStatusDeletionNoticeKey, keyStruct, StatusConverter.schemaStatusDeletionNotice, valueStruct);
       this.messageQueue.add(record);
+      log.debug("onDeletionNotice(): messageQueue.size() = {}", Integer.toString(this.messageQueue.size()));
     } catch (Exception ex) {
       if (log.isErrorEnabled()) {
         log.error("Exception thrown", ex);

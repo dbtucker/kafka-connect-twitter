@@ -80,6 +80,6 @@ public class TwitterSourceConnector extends SourceConnector {
 
   @Override
   public ConfigDef config() {
-    return TwitterSourceConnectorConfig.conf();
+    return TwitterSourceConnectorConfig.CONFIG_DEF;
   }
 }
