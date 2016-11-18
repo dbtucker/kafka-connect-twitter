@@ -1,6 +1,6 @@
 .idea/
 target/
-SchemaedFile.iml
+kafka-connect-twitter.iml
 pom.xml.tag
 pom.xml.releaseBackup
 pom.xml.versionsBackup
