@@ -21,7 +21,8 @@ DEV_DIR=$(dirname ${THIS_SCRIPT})
 CFG_DIR=${DEV_DIR}/config
 
 CP_HOME=${CP_HOME:-/opt/confluent}
-export CLASSPATH=${DEV_DIR}/target/kafka-connect-twitter-1.0-SNAPSHOT-package/share/java/kafka-connect-twitter/\*
+TARGET_DIR=$(ls -d ${DEV_DIR}/target/kafka-connect-*-package | tail -1)
+export CLASSPATH=${TARGET_DIR}/share/java/kafka-connect-twitter/\*
 
 if [ -n "${TEST_TYPE}"  -a  ! -r ${CFG_DIR}/Twitter${TEST_TYPE}-quickstart.properties ] ; then
 	echo "ERROR: cannot access ${CFG_DIR}/Twitter${TEST_TYPE}-quickstart.properties"
