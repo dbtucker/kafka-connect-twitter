@@ -20,6 +20,7 @@ import twitter4j.TwitterStreamFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 /* Memory Usage considerations {based on testing in Nov 2016} */
@@ -31,9 +32,11 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
   static final Logger log = LoggerFactory.getLogger(TwitterSourceTask.class);
   final ConcurrentLinkedDeque<SourceRecord> messageQueue = new ConcurrentLinkedDeque<>();
   int maxMessageQueueSize = 0;
+  boolean showQueueFullWarning = true;
 
   TwitterStream twitterStream;
   RateLimiter rateLimiter = null;
+  Random rateRandomizer = new Random();
   int maxRecordsPerPeriod = 0;
 
   @Override
@@ -54,7 +57,6 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
     maxRecordsPerPeriod = this.config.kafkaXferRate();
     if (maxRecordsPerPeriod > 0)
       rateLimiter = RateLimiter.create(1.0);
-
 
     TwitterStreamFactory twitterStreamFactory = new TwitterStreamFactory(this.config.configuration());
     this.twitterStream = twitterStreamFactory.getInstance();
@@ -81,8 +83,11 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
     int size = this.messageQueue.size();
     int throttledSize;
 
-    if (rateLimiter != null)
+      // Apply some jitter to our consumption by controlling the back-off
+    if (rateLimiter != null) {
       rateLimiter.acquire();
+      rateLimiter.setRate(0.75+(rateRandomizer.nextDouble()/2.0));
+    }
 
     if (maxRecordsPerPeriod > 0  &&  size > maxRecordsPerPeriod)
       throttledSize = maxRecordsPerPeriod;
@@ -107,6 +112,7 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
     }
 
     log.debug("poll(): returning {} SourceRecords", Integer.toString(records.size()));
+    showQueueFullWarning = true;
     return records;
   }
 
@@ -121,7 +127,15 @@ public class TwitterSourceTask extends SourceTask implements StatusListener {
   @Override
   public void onStatus(Status status) {
     if (maxMessageQueueSize > 0  &&  this.messageQueue.size() > maxMessageQueueSize) {
-      log.info("onStatus(): Twitter messageQueue full ({} messages); discarding tweet", this.messageQueue.size());
+
+        // No need to repeat queue full warning between calls to poll() unless we're seriously logging
+      if (showQueueFullWarning) {
+        log.info("onStatus(): Twitter messageQueue full ({} messages); discarding tweets until next poll()", this.messageQueue.size());
+        showQueueFullWarning = false;
+      } else {
+        log.trace("onStatus(): Twitter messageQueue full ({} messages); discarding tweets until next poll()", this.messageQueue.size());
+      }
+
       return;
     }
 
